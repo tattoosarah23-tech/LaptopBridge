@@ -58,6 +58,17 @@ jobs:
           $project = Join-Path $destination 'LaptopBridge_Desktop_v1_4_PREPARADO_PARA_BUILD_MSIX'
           if (-not (Test-Path -LiteralPath (Join-Path $project 'build/build-windows.ps1'))) { throw 'Expected build script missing from source ZIP' }
           "LB_SOURCE=$project" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Fix Windows 8.3 path alias in test assertion
+        shell: pwsh
+        run: |
+          # The displayed deletion target uses its canonical Windows path.
+          # Python's TemporaryDirectory can return an 8.3 alias. Compare file identity.
+          $test = Join-Path $env:LB_SOURCE 'tests/test_distribution.py'
+          $content = [System.IO.File]::ReadAllText($test)
+          $old = '            self.assertIn(str(target),prompts[0])'
+          $new = "            self.assertTrue(Path(prompts[0].split('  (', 1)[0]).samefile(target))"
+          if (-not $content.Contains($old)) { throw 'Expected assertion not found' }
+          [System.IO.File]::WriteAllText($test, $content.Replace($old, $new), [System.Text.UTF8Encoding]::new($false))
       - name: Run tests and compile Windows executables
         shell: pwsh
         run: '& "$env:LB_SOURCE\build\build-windows.ps1" -PythonCommand python'
