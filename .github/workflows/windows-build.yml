@@ -1,0 +1,102 @@
+name: LaptopBridge Windows + MSIX build (UNSIGNED)
+on:
+  workflow_dispatch:
+    inputs:
+      store_submission:
+        description: "Use Partner Center identity for Store submission (default: preview only)"
+        type: boolean
+        required: true
+        default: false
+      package_name:
+        description: "Partner Center Package/Identity/Name"
+        type: string
+        required: false
+      publisher:
+        description: "Partner Center Package/Identity/Publisher (CN=...)"
+        type: string
+        required: false
+      publisher_display_name:
+        description: "Partner Center PublisherDisplayName"
+        type: string
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-build.yml"
+      - "LaptopBridge_Desktop_v1_4_PROYECTO_MSIX_COMPLETO.zip"
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      LB_STORE: ${{ inputs.store_submission }}
+      LB_PACKAGE_NAME: ${{ inputs.package_name }}
+      LB_PUBLISHER: ${{ inputs.publisher }}
+      LB_PUBLISHER_DISPLAY_NAME: ${{ inputs.publisher_display_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          architecture: x64
+      - name: Verify ZIP and extract source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'LaptopBridge_Desktop_v1_4_PROYECTO_MSIX_COMPLETO.zip'
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'The ZIP source archive is missing.' }
+          $expected = '8da4950c8cc787aea0077722c2fbc3e93c2a1170cd39ec7d8d3811e3cc225718'
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Source ZIP SHA-256 mismatch: $actual" }
+          $destination = Join-Path $env:RUNNER_TEMP 'LaptopBridgeSource'
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $destination -Force
+          $project = Join-Path $destination 'LaptopBridge_Desktop_v1_4_PREPARADO_PARA_BUILD_MSIX'
+          if (-not (Test-Path -LiteralPath (Join-Path $project 'build/build-windows.ps1'))) { throw 'Expected build script missing from source ZIP' }
+          "LB_SOURCE=$project" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run tests and compile Windows executables
+        shell: pwsh
+        run: '& "$env:LB_SOURCE\build\build-windows.ps1" -PythonCommand python'
+      - name: MCP smoke test with disposable profile
+        shell: pwsh
+        run: 'python "$env:LB_SOURCE\scripts\smoke_mcp_windows.py" "$env:LB_SOURCE\.build-windows\dist\LaptopBridge-MCP\LaptopBridge-MCP.exe"'
+      - name: Inspect PE binaries (unsigned)
+        shell: pwsh
+        run: '& "$env:LB_SOURCE\build\inventory-pe.ps1" -Folder "$env:LB_SOURCE\.build-windows\dist"'
+      - name: Generate unsigned preview or Store-submission MSIX
+        shell: pwsh
+        run: |
+          if ($env:LB_STORE -eq 'true') {
+            if ([string]::IsNullOrWhiteSpace($env:LB_PACKAGE_NAME) -or [string]::IsNullOrWhiteSpace($env:LB_PUBLISHER) -or [string]::IsNullOrWhiteSpace($env:LB_PUBLISHER_DISPLAY_NAME)) {
+              throw 'All three exact Partner Center identity inputs are required for Store submission.'
+            }
+            & "$env:LB_SOURCE\msix\build-store-msix.ps1" -StoreSubmission -PackageName $env:LB_PACKAGE_NAME -Publisher $env:LB_PUBLISHER -PublisherDisplayName $env:LB_PUBLISHER_DISPLAY_NAME
+          } else {
+            & "$env:LB_SOURCE\msix\build-store-msix.ps1" -Preview
+          }
+      - name: Print MSIX SHA-256
+        shell: pwsh
+        run: |
+          Get-ChildItem -LiteralPath "$env:LB_SOURCE\.build-windows\msix" -Filter '*.msix' -File | ForEach-Object {
+            Write-Host ("SHA256 {0}: {1}" -f $_.Name, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)
+          }
+      - name: Upload Windows binaries (unsigned; DO NOT INSTALL)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaptopBridge_v1_4_UNSIGNED_BINARIES_NOT_FOR_INSTALLATION
+          path: ${{ runner.temp }}/LaptopBridgeSource/LaptopBridge_Desktop_v1_4_PREPARADO_PARA_BUILD_MSIX/.build-windows/dist/
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Upload unsigned MSIX (DO NOT SIDELOAD)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaptopBridge_v1_4_MSIX_UNSIGNED_NOT_FOR_SIDELOAD
+          path: ${{ runner.temp }}/LaptopBridgeSource/LaptopBridge_Desktop_v1_4_PREPARADO_PARA_BUILD_MSIX/.build-windows/msix/*.msix
+          if-no-files-found: warn
+          retention-days: 3
